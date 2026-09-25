@@ -1,0 +1,9 @@
+/data/*
+!/data/.gitkeep
+/train_data/*
+!/train_data/.gitkeep
+/val_data/*
+!/val_data/.gitkeep
+/test_data/*
+!/test_data/.gitkeep
+.DS_Store
