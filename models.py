@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+device = 'mps'
 
 class NeuralNet2(nn.Module):
   def __init__(self):
@@ -113,7 +114,7 @@ class NeuralNet4(nn.Module):
     mag3 = torch.sum(diff3 ** 2, dim=1, keepdim=True)
     magcat = torch.cat((mag1, mag2, mag3), dim=1)
     _, indices = torch.sort(magcat, dim=1)
-    nums = torch.arange(x1.shape[0], device='mps')
+    nums = torch.arange(x1.shape[0], device=device)
     diffstack = torch.stack((diff1, diff2, diff3), dim=1)
     mini = diffstack[nums, indices[:, 0]]
     mid = diffstack[nums, indices[:, 1]]
@@ -165,7 +166,7 @@ class NeuralNet5(nn.Module):
     mag4 = torch.sum(diff4 ** 2, dim=1, keepdim=True)
     magcat = torch.cat((mag1, mag2, mag3, mag4), dim=1)
     _, indices = torch.sort(magcat, dim=1)
-    nums = torch.arange(x1.shape[0], device='mps')
+    nums = torch.arange(x1.shape[0], device=device)
     diffstack = torch.stack((diff1, diff2, diff3, diff4), dim=1)
     rank1 = diffstack[nums, indices[:, 0]]
     rank2 = diffstack[nums, indices[:, 1]]
@@ -221,7 +222,7 @@ class NeuralNet6(nn.Module):
     mag5 = torch.sum(diff5 ** 2, dim=1, keepdim=True)
     magcat = torch.cat((mag1, mag2, mag3, mag4, mag5), dim=1)
     _, indices = torch.sort(magcat, dim=1)
-    nums = torch.arange(x1.shape[0], device='mps')
+    nums = torch.arange(x1.shape[0], device=device)
     diffstack = torch.stack((diff1, diff2, diff3, diff4, diff5), dim=1)
     rank1 = diffstack[nums, indices[:, 0]]
     rank2 = diffstack[nums, indices[:, 1]]
@@ -229,6 +230,186 @@ class NeuralNet6(nn.Module):
     rank4 = diffstack[nums, indices[:, 3]]
     rank5 = diffstack[nums, indices[:, 4]]
     x = torch.cat((rank1, rank2, rank3, rank4, rank5), dim=1)
+    x = F.relu(self.bn1(self.fc1(x)))
+    x = self.dropout(x)
+    x = F.relu(self.bn2(self.fc2(x)))
+    x = self.dropout(x)
+    x = self.fc3(x)
+    return x
+
+class NeuralNetBCS(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 16, 5, padding=2)
+        self.conv2 = nn.Conv2d(16, 32, 5, padding=2)
+        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.embedding = nn.Linear(8192, 256)
+    def forward_once(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = self.pool(F.relu(self.conv3(x)))
+        x = self.pool(F.relu(self.conv4(x)))
+        x = x.flatten(1)
+        x = self.embedding(x)
+        return F.normalize(x, p=2, dim=1)
+    def forward(self, references, query):
+        B, N, C, H, W = references.shape
+        references = references.reshape(B * N, C, H, W)
+        ref_emb = self.forward_once(references)
+        ref_emb = ref_emb.reshape(B, N, -1)
+        query_emb = self.forward_once(query)
+        similarities = torch.sum(ref_emb * query_emb.unsqueeze(1), dim=2)
+        _, best = torch.max(similarities, dim=1)
+        best_ref_emb = ref_emb[torch.arange(B), best]
+        return query_emb, best_ref_emb
+
+class NeuralNetUnsorted4(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.conv1 = nn.Conv2d(3, 16, 5, padding=2)
+    self.conv2 = nn.Conv2d(16, 32, 5, padding=2)
+    self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+    self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+    self.pool = nn.MaxPool2d(2, 2)
+    self.embedding = nn.Linear(8192, 256)
+    self.fc1 = nn.Linear(768, 128)
+    self.bn1 = nn.BatchNorm1d(128)
+    self.fc2 = nn.Linear(128, 64)
+    self.bn2 = nn.BatchNorm1d(64)
+    self.fc3 = nn.Linear(64, 1)
+    self.dropout = nn.Dropout(0.4)
+  def forward_once(self, x):
+    x = self.pool(F.relu(self.conv1(x)))
+    x = self.pool(F.relu(self.conv2(x)))
+    x = self.pool(F.relu(self.conv3(x)))
+    x = self.pool(F.relu(self.conv4(x)))
+    x = x.flatten(1)
+    x = self.embedding(x)
+    return F.normalize(x, p=2, dim=1)
+  def forward(self, x1, x2, x3, x4):
+    x1 = self.forward_once(x1)
+    x2 = self.forward_once(x2)
+    x3 = self.forward_once(x3)
+    x4 = self.forward_once(x4)
+    diff1 = torch.abs(x1 - x4)
+    diff2 = torch.abs(x2 - x4)
+    diff3 = torch.abs(x3 - x4)
+    x = torch.cat((diff1, diff2, diff3), dim=1)
+    x = F.relu(self.bn1(self.fc1(x)))
+    x = self.dropout(x)
+    x = F.relu(self.bn2(self.fc2(x)))
+    x = self.dropout(x)
+    x = self.fc3(x)
+    return x
+
+class NeuralNetNoFC4(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.conv1 = nn.Conv2d(3, 16, 5, padding=2)
+    self.conv2 = nn.Conv2d(16, 32, 5, padding=2)
+    self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+    self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+    self.pool = nn.MaxPool2d(2, 2)
+    self.embedding = nn.Linear(8192, 256)
+    self.output = nn.Linear(768, 1)
+  def forward_once(self, x):
+    x = self.pool(F.relu(self.conv1(x)))
+    x = self.pool(F.relu(self.conv2(x)))
+    x = self.pool(F.relu(self.conv3(x)))
+    x = self.pool(F.relu(self.conv4(x)))
+    x = x.flatten(1)
+    x = self.embedding(x)
+    return F.normalize(x, p=2, dim=1)
+  def forward(self, x1, x2, x3, x4):
+    x1 = self.forward_once(x1)
+    x2 = self.forward_once(x2)
+    x3 = self.forward_once(x3)
+    x4 = self.forward_once(x4)
+    diff1 = torch.abs(x1 - x4)
+    diff2 = torch.abs(x2 - x4)
+    diff3 = torch.abs(x3 - x4)
+    mag1 = torch.sum(diff1 ** 2, dim=1, keepdim=True)
+    mag2 = torch.sum(diff2 ** 2, dim=1, keepdim=True)
+    mag3 = torch.sum(diff3 ** 2, dim=1, keepdim=True)
+    magcat = torch.cat((mag1, mag2, mag3), dim=1)
+    _, indices = torch.sort(magcat, dim=1)
+    nums = torch.arange(x1.shape[0], device=device)
+    diffstack = torch.stack((diff1, diff2, diff3), dim=1)
+    mini = diffstack[nums, indices[:, 0]]
+    mid = diffstack[nums, indices[:, 1]]
+    maxi = diffstack[nums, indices[:, 2]]
+    x = torch.cat((mini, mid, maxi), dim=1)
+    x = self.output(x)
+    return x
+
+class NeuralNetNoDist4(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.conv1 = nn.Conv2d(3, 16, 5, padding=2)
+    self.conv2 = nn.Conv2d(16, 32, 5, padding=2)
+    self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+    self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+    self.pool = nn.MaxPool2d(2, 2)
+    self.embedding = nn.Linear(8192, 256)
+    self.fc1 = nn.Linear(1024, 128)
+    self.bn1 = nn.BatchNorm1d(128)
+    self.fc2 = nn.Linear(128, 64)
+    self.bn2 = nn.BatchNorm1d(64)
+    self.fc3 = nn.Linear(64, 1)
+    self.dropout = nn.Dropout(0.4)
+  def forward_once(self, x):
+    x = self.pool(F.relu(self.conv1(x)))
+    x = self.pool(F.relu(self.conv2(x)))
+    x = self.pool(F.relu(self.conv3(x)))
+    x = self.pool(F.relu(self.conv4(x)))
+    x = x.flatten(1)
+    x = self.embedding(x)
+    return F.normalize(x, p=2, dim=1)
+  def forward(self, x1, x2, x3, x4):
+    x1 = self.forward_once(x1)
+    x2 = self.forward_once(x2)
+    x3 = self.forward_once(x3)
+    x4 = self.forward_once(x4)
+    x = torch.cat((x1, x2, x3, x4), dim=1)
+    x = F.relu(self.bn1(self.fc1(x)))
+    x = self.dropout(x)
+    x = F.relu(self.bn2(self.fc2(x)))
+    x = self.dropout(x)
+    x = self.fc3(x)
+    return x
+
+class NeuralNetAvg4(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.conv1 = nn.Conv2d(3, 16, 5, padding=2)
+    self.conv2 = nn.Conv2d(16, 32, 5, padding=2)
+    self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+    self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
+    self.pool = nn.MaxPool2d(2, 2)
+    self.embedding = nn.Linear(8192, 256)
+    self.fc1 = nn.Linear(256, 128)
+    self.bn1 = nn.BatchNorm1d(128)
+    self.fc2 = nn.Linear(128, 64)
+    self.bn2 = nn.BatchNorm1d(64)
+    self.fc3 = nn.Linear(64, 1)
+    self.dropout = nn.Dropout(0.4)
+  def forward_once(self, x):
+    x = self.pool(F.relu(self.conv1(x)))
+    x = self.pool(F.relu(self.conv2(x)))
+    x = self.pool(F.relu(self.conv3(x)))
+    x = self.pool(F.relu(self.conv4(x)))
+    x = x.flatten(1)
+    x = self.embedding(x)
+    return F.normalize(x, p=2, dim=1)
+  def forward(self, x1, x2, x3, x4):
+    x1 = self.forward_once(x1)
+    x2 = self.forward_once(x2)
+    x3 = self.forward_once(x3)
+    x4 = self.forward_once(x4)
+    x_avg = (x1 + x2 + x3) / 3
+    x = torch.abs(x_avg - x4)
     x = F.relu(self.bn1(self.fc1(x)))
     x = self.dropout(x)
     x = F.relu(self.bn2(self.fc2(x)))
